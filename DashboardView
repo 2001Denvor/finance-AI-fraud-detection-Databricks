@@ -1,0 +1,151 @@
+CREATE OR REPLACE VIEW fraud_financial_summary AS
+SELECT
+    -- Total actual fraud exposure (without model)
+    SUM(CASE WHEN Class = 1 THEN Amount ELSE 0 END) AS total_actual_fraud,
+
+    -- Fraud correctly detected (True Positive amount)
+    SUM(CASE WHEN Class = 1 AND prediction = 1 THEN Amount ELSE 0 END) AS fraud_prevented,
+
+    -- Fraud missed (False Negative amount)
+    SUM(CASE WHEN Class = 1 AND prediction = 0 THEN Amount ELSE 0 END) AS fraud_missed,
+
+    -- Operational review cost (False Positives × $5)
+    SUM(CASE WHEN Class = 0 AND prediction = 1 THEN 1 ELSE 0 END) * 5 * 360 AS operational_cost,
+
+    -- Expected loss after applying model
+    (
+        SUM(CASE WHEN Class = 1 AND prediction = 0 THEN Amount ELSE 0 END)
+        +
+        SUM(CASE WHEN Class = 0 AND prediction = 1 THEN 1 ELSE 0 END) * 5 * 360
+    ) AS expected_loss_with_model,
+
+    -- Expected Loss Reduction (ELR)
+    (
+        SUM(CASE WHEN Class = 1 THEN Amount ELSE 0 END)
+        -
+        (
+            SUM(CASE WHEN Class = 1 AND prediction = 0 THEN Amount ELSE 0 END)
+            +
+            SUM(CASE WHEN Class = 0 AND prediction = 1 THEN 1 ELSE 0 END) * 5 * 360
+        )
+    ) AS ELR,
+
+    -- ROI (ratio, NOT multiplied by 100)
+    (
+        (
+            SUM(CASE WHEN Class = 1 AND prediction = 1 THEN Amount ELSE 0 END)
+            -
+            SUM(CASE WHEN Class = 0 AND prediction = 1 THEN 1 ELSE 0 END) * 5 * 360
+        ) * 1.0
+        /
+        NULLIF(
+            SUM(CASE WHEN Class = 0 AND prediction = 1 THEN 1 ELSE 0 END) * 5 * 360 ,
+            0
+        )
+    ) AS ROI_percent,
+
+    -- Savings ratio (NOT multiplied by 100)
+    (
+        SUM(CASE WHEN Class = 1 AND prediction = 1 THEN Amount ELSE 0 END) * 1.0
+        /
+        NULLIF(SUM(CASE WHEN Class = 1 THEN Amount ELSE 0 END), 0)
+    ) AS savings_percent
+
+FROM predictions;
+
+
+--Fraud vs Legitimate Distribution
+CREATE OR REPLACE VIEW vw_fraud_distribution AS
+SELECT
+    Class,
+    COUNT(*) AS total_transactions
+FROM predictions
+GROUP BY Class;
+
+--Confusion Matrix
+CREATE OR REPLACE VIEW vw_confusion_matrix AS
+SELECT
+    Class AS actual,
+    prediction AS predicted,
+    COUNT(*) AS total
+FROM predictions
+GROUP BY Class, prediction;
+
+--Fraud Amount Comparition
+CREATE OR REPLACE VIEW vw_fraud_amount AS
+SELECT
+    SUM(CASE WHEN Class = 1 THEN Amount ELSE 0 END) AS actual_fraud_amount,
+    SUM(CASE WHEN Class = 1 AND prediction = 1 THEN Amount ELSE 0 END) AS detected_fraud_amount
+FROM predictions;
+
+--Business Impact View
+CREATE OR REPLACE VIEW vw_business_impact AS
+SELECT
+    SUM(CASE WHEN Class = 1 AND prediction = 1 THEN Amount ELSE 0 END) AS prevented_loss,
+    SUM(CASE WHEN Class = 0 AND prediction = 1 THEN Amount ELSE 0 END) AS blocked_legit_amount,
+    COUNT(CASE WHEN Class = 0 AND prediction = 1 THEN 1 END) * 5 AS review_cost
+FROM predictions;
+
+--Model Performance Matrics
+CREATE OR REPLACE VIEW vw_fraud_detection_rate AS
+SELECT 
+  SUM(CASE WHEN Class = 1 AND prediction = 1 THEN 1 ELSE 0 END) * 1.0 /
+  NULLIF(SUM(CASE WHEN Class = 1 THEN 1 ELSE 0 END), 0)
+  AS fraud_detection_rate
+FROM predictions;
+
+--Percision & Recall
+CREATE OR REPLACE VIEW vw_precision_recall AS
+SELECT
+    SUM(CASE WHEN Class = 1 AND prediction = 1 THEN 1 ELSE 0 END) * 1.0 /
+    NULLIF(SUM(CASE WHEN prediction = 1 THEN 1 ELSE 0 END),0)
+    AS precision_percent,
+
+    SUM(CASE WHEN Class = 1 AND prediction = 1 THEN 1 ELSE 0 END) * 1.0 /
+    NULLIF(SUM(CASE WHEN Class = 1 THEN 1 ELSE 0 END),0)
+    AS recall_percent
+FROM predictions;
+
+--Total Transaction
+CREATE OR REPLACE VIEW vw_f1_score AS
+SELECT
+    2 * (precision_percent * recall_percent) /
+    NULLIF(precision_percent + recall_percent, 0)
+    AS f1_score_percent
+FROM vw_precision_recall;
+
+--False Positive
+CREATE OR REPLACE VIEW vw_false_positives AS
+SELECT COUNT(*) AS false_positives
+FROM predictions
+WHERE Class = 0 AND prediction = 1;
+
+--Estimated Fraud Amount Save
+CREATE OR REPLACE VIEW vw_fraud_amount_saved AS
+SELECT 
+    ROUND(SUM(Amount),2) AS estimated_fraud_amount_saved
+FROM predictions
+WHERE Class = 1 AND prediction = 1;
+
+--Average Transaction Amount
+CREATE OR REPLACE VIEW vw_avg_transaction_amount AS
+SELECT
+    Class,
+    ROUND(AVG(Amount),2) AS avg_amount
+FROM predictions
+GROUP BY Class;
+
+--Top 10 frauds
+CREATE OR REPLACE VIEW vw_top_frauds AS
+WITH ranked_frauds AS (
+    SELECT
+        *,
+        ROW_NUMBER() OVER (ORDER BY Amount DESC) AS rank,
+        from_unixtime(Time, 'HH:mm:ss') AS transaction_time,
+        ROUND(Amount * 310, 2) AS amount_lkr
+    FROM predictions
+    WHERE prediction = 1
+)
+SELECT *
+FROM ranked_frauds
+WHERE rank <= 10;
